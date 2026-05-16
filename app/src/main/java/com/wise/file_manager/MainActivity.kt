@@ -8,24 +8,30 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
-import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CleaningServices
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.IntOffset
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.wise.file_manager.ui.theme.WiseFileManagerTheme
+import java.io.File
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> }
@@ -39,50 +45,95 @@ class MainActivity : ComponentActivity() {
             WiseFileManagerTheme {
                 val viewModel: FileViewModel = viewModel()
                 val currentScreen by viewModel.currentScreen.collectAsState()
+                val previewFile by viewModel.previewFile.collectAsState()
 
-                Scaffold(
-                    bottomBar = {
-                        if (currentScreen == AppScreen.Home) {
-                            NavigationBar {
-                                NavigationBarItem(
-                                    icon = { Icon(Icons.Default.CleaningServices, contentDescription = "Clean") },
-                                    label = { Text("Clean") },
-                                    selected = false,
-                                    onClick = { /* TODO */ }
-                                )
-                                NavigationBarItem(
-                                    icon = { Icon(Icons.Default.Folder, contentDescription = "Browse") },
-                                    label = { Text("Browse") },
-                                    selected = true,
-                                    onClick = { viewModel.navigateToHome() }
-                                )
-                                NavigationBarItem(
-                                    icon = { Icon(Icons.Default.Share, contentDescription = "Share") },
-                                    label = { Text("Share") },
-                                    selected = false,
-                                    onClick = { /* TODO */ }
-                                )
-                            }
-                        }
-                    }
-                ) { paddingValues ->
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(paddingValues),
-                        color = MaterialTheme.colorScheme.background
-                    ) {
-                        when (currentScreen) {
-                            AppScreen.Home -> BrowseScreen(
-                                onCategoryClick = { category ->
-                                    viewModel.navigateToExplorer()
-                                },
-                                onStorageClick = {
-                                    viewModel.navigateToExplorer()
-                                }
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    AnimatedContent(
+                        targetState = currentScreen,
+                        transitionSpec = {
+                            val animationSpec = tween<Float>(durationMillis = 400, easing = FastOutSlowInEasing)
+                            val slideSpec = tween<IntOffset>(durationMillis = 400, easing = FastOutSlowInEasing)
+                            
+                            if (targetState != AppScreen.Explorer) {
+                                (slideInHorizontally(animationSpec = slideSpec) { it } + 
+                                 fadeIn(animationSpec = animationSpec) + 
+                                 scaleIn(initialScale = 0.92f, animationSpec = animationSpec))
+                                    .togetherWith(
+                                        slideOutHorizontally(animationSpec = slideSpec) { -it / 3 } + 
+                                        fadeOut(animationSpec = animationSpec)
+                                    )
+                            } else {
+                                (slideInHorizontally(animationSpec = slideSpec) { -it / 3 } + 
+                                 fadeIn(animationSpec = animationSpec))
+                                    .togetherWith(
+                                        slideOutHorizontally(animationSpec = slideSpec) { it } + 
+                                        fadeOut(animationSpec = animationSpec) + 
+                                        scaleOut(targetScale = 0.92f, animationSpec = animationSpec)
+                                    )
+                            }.using(
+                                SizeTransform(clip = false)
                             )
-                            AppScreen.Explorer -> FileManagerScreen(viewModel)
-                        }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = androidx.compose.ui.Alignment.Center,
+                        label = "screen_transition"
+                    ) { screen ->
+                        ScreenWrapper(screen, viewModel, previewFile)
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ScreenWrapper(screen: AppScreen, viewModel: FileViewModel, previewFile: File?) {
+        Box(modifier = Modifier.fillMaxSize().graphicsLayer {
+            clip = false
+        }) {
+            when (screen) {
+                AppScreen.Explorer -> FileManagerScreen(viewModel)
+                AppScreen.PdfViewer -> {
+                    BackHandler { viewModel.closePreview() }
+                    previewFile?.let { file ->
+                        PdfViewerPage(
+                            viewModel = viewModel,
+                            file = file,
+                            onBack = { viewModel.closePreview() }
+                        )
+                    }
+                }
+                AppScreen.AudioPlayer -> {
+                    BackHandler { viewModel.closePreview() }
+                    previewFile?.let { file ->
+                        AudioPlayerScreen(
+                            viewModel = viewModel,
+                            file = file,
+                            onBack = { viewModel.closePreview() }
+                        )
+                    }
+                }
+                AppScreen.ImageViewer -> {
+                    BackHandler { viewModel.closePreview() }
+                    previewFile?.let { file ->
+                        ImageViewerScreen(
+                            viewModel = viewModel,
+                            file = file,
+                            onBack = { viewModel.closePreview() }
+                        )
+                    }
+                }
+                AppScreen.VideoPlayer -> {
+                    BackHandler { viewModel.closePreview() }
+                    previewFile?.let { file ->
+                        @OptIn(ExperimentalMaterial3Api::class)
+                        VideoPlayerScreen(
+                            viewModel = viewModel,
+                            file = file,
+                            onBack = { viewModel.closePreview() }
+                        )
                     }
                 }
             }
