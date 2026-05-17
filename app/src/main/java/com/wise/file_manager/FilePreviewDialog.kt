@@ -70,6 +70,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.commit
 import androidx.pdf.viewer.fragment.PdfViewerFragment
+import androidx.compose.ui.platform.LocalView
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -93,9 +94,20 @@ fun PdfViewerPage(viewModel: FileViewModel, file: File, onBack: () -> Unit) {
     
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    
-    val listState = rememberLazyListState()
-    val firstVisibleItem by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+
+    // System Bar Controller
+    val view = LocalView.current
+    val window = (view.context as Activity).window
+    val insetsController = remember { WindowCompat.getInsetsController(window, view) }
+
+    LaunchedEffect(isUiVisible) {
+        if (!isUiVisible) {
+            insetsController.hide(WindowInsetsCompat.Type.statusBars())
+            insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else {
+            insetsController.show(WindowInsetsCompat.Type.statusBars())
+        }
+    }
 
     val pdfHistory by viewModel.pdfHistory.collectAsState()
     val recentPdfs by viewModel.recentPdfs.collectAsState()

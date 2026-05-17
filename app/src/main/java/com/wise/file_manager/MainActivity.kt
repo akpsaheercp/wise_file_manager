@@ -31,12 +31,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.wise.file_manager.ui.theme.WiseFileManagerTheme
 import java.io.File
 
+import androidx.activity.enableEdgeToEdge
+
 class MainActivity : FragmentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         
         requestStoragePermissions()
@@ -94,7 +97,15 @@ class MainActivity : FragmentActivity() {
             clip = false
         }) {
             when (screen) {
-                AppScreen.Explorer -> FileManagerScreen(viewModel)
+                AppScreen.Home -> HomeScreen(viewModel)
+                AppScreen.Explorer -> {
+                    BackHandler {
+                        if (!viewModel.goBack()) {
+                            viewModel.navigateToScreen(AppScreen.Home)
+                        }
+                    }
+                    FileManagerScreen(viewModel)
+                }
                 AppScreen.PdfViewer -> {
                     BackHandler { viewModel.closePreview() }
                     previewFile?.let { file ->
