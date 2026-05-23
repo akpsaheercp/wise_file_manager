@@ -147,6 +147,26 @@ class MainActivity : FragmentActivity() {
                         )
                     }
                 }
+                AppScreen.TextViewer -> {
+                    BackHandler { viewModel.closePreview() }
+                    previewFile?.let { file ->
+                        TextViewerScreen(
+                            viewModel = viewModel,
+                            file = file,
+                            onBack = { viewModel.closePreview() }
+                        )
+                    }
+                }
+                AppScreen.ArchiveExplorer -> {
+                    BackHandler { viewModel.closePreview() }
+                    previewFile?.let { file ->
+                        ArchiveExplorerScreen(
+                            viewModel = viewModel,
+                            file = file,
+                            onBack = { viewModel.closePreview() }
+                        )
+                    }
+                }
             }
         }
     }

@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.util.LruCache
 import android.util.Xml
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -85,6 +86,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.util.zip.ZipFile
 import kotlin.math.roundToInt
+
+private val pdfThumbnailCache = LruCache<String, Bitmap>(50) // Cache last 50 PDF thumbnails
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -621,23 +624,29 @@ fun PdfGridItem(file: File, onFileClick: (File) -> Unit) {
 
 @Composable
 fun PdfThumbnail(file: File, size: androidx.compose.ui.unit.Dp) {
-    var thumbnail by remember(file) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(file) {
-        withContext(Dispatchers.IO) {
-            try {
-                val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-                val renderer = PdfRenderer(pfd)
-                if (renderer.pageCount > 0) {
-                    val page = renderer.openPage(0)
-                    val bitmap = Bitmap.createBitmap(page.width / 4, page.height / 4, Bitmap.Config.ARGB_8888)
-                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    thumbnail = bitmap
-                    page.close()
-                }
-                renderer.close(); pfd.close()
-            } catch (e: Exception) { }
+    var thumbnail by remember(file) { mutableStateOf(pdfThumbnailCache.get(file.absolutePath)) }
+    
+    if (thumbnail == null) {
+        LaunchedEffect(file) {
+            delay(100) // Small delay to prioritize scroll performance
+            withContext(Dispatchers.IO) {
+                try {
+                    val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                    val renderer = PdfRenderer(pfd)
+                    if (renderer.pageCount > 0) {
+                        val page = renderer.openPage(0)
+                        val bitmap = Bitmap.createBitmap(page.width / 4, page.height / 4, Bitmap.Config.ARGB_8888)
+                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        pdfThumbnailCache.put(file.absolutePath, bitmap)
+                        thumbnail = bitmap
+                        page.close()
+                    }
+                    renderer.close(); pfd.close()
+                } catch (e: Exception) { }
+            }
         }
     }
+    
     thumbnail?.let { Image(bitmap = it.asImageBitmap(), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
         ?: Icon(Icons.Default.PictureAsPdf, null, tint = Color(0xFFF44336), modifier = Modifier.size(size * 0.6f))
 }

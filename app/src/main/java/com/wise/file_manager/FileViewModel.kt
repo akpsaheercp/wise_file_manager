@@ -19,26 +19,40 @@ import java.io.File
 import java.util.*
 import com.wise.file_manager.db.FileMetadata
 
+import androidx.compose.runtime.Immutable
+import kotlinx.coroutines.flow.*
+
+@Immutable
 enum class AppScreen {
-    Home, Explorer, PdfViewer, AudioPlayer, ImageViewer, VideoPlayer
+    Home, Explorer, PdfViewer, AudioPlayer, ImageViewer, VideoPlayer, TextViewer, ArchiveExplorer
 }
 
+@Immutable
 enum class FilterMode {
     None, Images, Videos, Audio, Apks, Archives, Documents, FilesOnly
 }
 
+@Immutable
 enum class SortType {
     Name, Size, Date, Type
 }
 
+@Immutable
 enum class SortOrder {
     Ascending, Descending
 }
 
+@Immutable
 enum class ViewMode {
     Compact, Detailed, Columned, Grid, Gallery, Minimal
 }
 
+@Immutable
+enum class CreateType {
+    Folder, File, Database
+}
+
+@Immutable
 data class NavigationItem(
     val title: String,
     val path: String,
@@ -46,17 +60,21 @@ data class NavigationItem(
     val filterMode: FilterMode = FilterMode.None
 )
 
+@Immutable
 data class SearchOptions(
     val searchSubfolders: Boolean = false,
     val caseSensitive: Boolean = false,
     val regex: Boolean = false
 )
 
+@Immutable
 data class ExplorerTab(
     val id: String = UUID.randomUUID().toString(),
-    var path: String,
-    val pathStack: Stack<String> = Stack(),
-    var files: List<File> = emptyList()
+    val path: String,
+    val pathStack: List<String> = emptyList(),
+    val files: List<File> = emptyList(),
+    val scrollIndex: Int = 0,
+    val scrollOffset: Int = 0
 )
 
 class FileViewModel(application: Application) : AndroidViewModel(application) {
@@ -80,21 +98,35 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     val activeTabIndex: StateFlow<Int> = _activeTabIndex.asStateFlow()
 
     fun addNewTab(path: String? = null) {
-        val currentTab = _tabs.value[_activeTabIndex.value]
+        val currentTab = _tabs.value.getOrNull(_activeTabIndex.value) ?: _tabs.value.first()
         val newPath = path ?: currentTab.path
         val newList = _tabs.value.toMutableList()
-        newList.add(ExplorerTab(path = newPath))
+        
+        // Clone current files if path matches
+        val initialFiles = if (newPath == currentTab.path) currentTab.files else fileCache[newPath] ?: emptyList()
+        
+        val newTab = ExplorerTab(
+            path = newPath,
+            files = initialFiles,
+            pathStack = currentTab.pathStack
+        )
+        newList.add(newTab)
         _tabs.value = newList
-        _activeTabIndex.value = newList.size - 1
-        loadFiles(newPath)
+        val newIndex = newList.size - 1
+        _activeTabIndex.value = newIndex
+        
+        _currentPath.value = newPath
+        _files.value = initialFiles
+        updateBreadcrumbs(newPath)
     }
 
     fun switchTab(index: Int) {
         if (index in _tabs.value.indices) {
             _activeTabIndex.value = index
             val tab = _tabs.value[index]
+            _currentPath.value = tab.path
             _files.value = tab.files
-            loadFiles(tab.path, fromTabSwitch = true)
+            updateBreadcrumbs(tab.path)
         }
     }
 
@@ -105,8 +137,42 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             _tabs.value = newList
             val nextIndex = if (_activeTabIndex.value >= newList.size) newList.size - 1 else _activeTabIndex.value
             _activeTabIndex.value = nextIndex
-            _files.value = newList[nextIndex].files
-            loadFiles(newList[nextIndex].path, fromTabSwitch = true)
+            val nextTab = newList[nextIndex]
+            _currentPath.value = nextTab.path
+            _files.value = nextTab.files
+            updateBreadcrumbs(nextTab.path)
+        }
+    }
+
+    fun moveTab(fromIndex: Int, toIndex: Int) {
+        if (fromIndex !in _tabs.value.indices || toIndex !in _tabs.value.indices || fromIndex == toIndex) return
+        
+        val newList = _tabs.value.toMutableList()
+        val tab = newList.removeAt(fromIndex)
+        newList.add(toIndex, tab)
+        _tabs.value = newList
+        
+        // Update active index if it was affected
+        if (_activeTabIndex.value == fromIndex) {
+            _activeTabIndex.value = toIndex
+        } else if (_activeTabIndex.value in (minOf(fromIndex, toIndex)..maxOf(fromIndex, toIndex))) {
+            if (fromIndex < toIndex) {
+                _activeTabIndex.value -= 1
+            } else {
+                _activeTabIndex.value += 1
+            }
+        }
+    }
+
+    fun updateScrollPosition(index: Int, offset: Int) {
+        val activeIndex = _activeTabIndex.value
+        val currentTabs = _tabs.value.toMutableList()
+        if (activeIndex in currentTabs.indices) {
+            currentTabs[activeIndex] = currentTabs[activeIndex].copy(
+                scrollIndex = index,
+                scrollOffset = offset
+            )
+            _tabs.value = currentTabs
         }
     }
 
@@ -127,6 +193,91 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _showDeleteConfirmation = MutableStateFlow(false)
     val showDeleteConfirmation: StateFlow<Boolean> = _showDeleteConfirmation.asStateFlow()
+
+    private val _showCreateDialog = MutableStateFlow(false)
+    val showCreateDialog: StateFlow<Boolean> = _showCreateDialog.asStateFlow()
+
+    private val _showInfoDialog = MutableStateFlow(false)
+    val showInfoDialog: StateFlow<Boolean> = _showInfoDialog.asStateFlow()
+
+    private val _infoFile = MutableStateFlow<File?>(null)
+    val infoFile: StateFlow<File?> = _infoFile.asStateFlow()
+
+    private val _infoSize = MutableStateFlow("Calculating...")
+    val infoSize: StateFlow<String> = _infoSize.asStateFlow()
+
+    private val _infoFileCount = MutableStateFlow(0)
+    val infoFileCount: StateFlow<Int> = _infoFileCount.asStateFlow()
+
+    private val _infoFolderCount = MutableStateFlow(0)
+    val infoFolderCount: StateFlow<Int> = _infoFolderCount.asStateFlow()
+
+    private var infoJob: Job? = null
+
+    fun showInfo(file: File) {
+        _infoFile.value = file
+        _showInfoDialog.value = true
+        _infoSize.value = if (file.isDirectory) "Calculating..." else FileUtils.formatFileSize(file.length())
+        _infoFileCount.value = 0
+        _infoFolderCount.value = 0
+        
+        if (file.isDirectory) {
+            infoJob?.cancel()
+            infoJob = viewModelScope.launch(Dispatchers.IO) {
+                val stats = calculateFolderStats(file)
+                withContext(Dispatchers.Main) {
+                    _infoSize.value = FileUtils.formatFileSize(stats.size)
+                    _infoFileCount.value = stats.fileCount
+                    _infoFolderCount.value = stats.folderCount
+                }
+            }
+        }
+    }
+
+    private data class FolderStats(val size: Long, val fileCount: Int, val folderCount: Int)
+
+    private fun calculateFolderStats(file: File): FolderStats {
+        var size = 0L
+        var files = 0
+        var folders = 0
+        
+        val children = file.listFiles() ?: return FolderStats(0, 0, 0)
+        for (f in children) {
+            if (f.isDirectory) {
+                folders++
+                val subStats = calculateFolderStats(f)
+                size += subStats.size
+                files += subStats.fileCount
+                folders += subStats.folderCount
+            } else {
+                files++
+                size += f.length()
+            }
+        }
+        return FolderStats(size, files, folders)
+    }
+
+    fun hideInfo() {
+        _showInfoDialog.value = false
+        _infoFile.value = null
+        infoJob?.cancel()
+    }
+
+    private val _createType = MutableStateFlow(CreateType.Folder)
+    val createType: StateFlow<CreateType> = _createType.asStateFlow()
+
+    fun showCreateDialog(type: CreateType? = null) {
+        type?.let { _createType.value = it }
+        _showCreateDialog.value = true
+    }
+
+    fun updateCreateType(type: CreateType) {
+        _createType.value = type
+    }
+
+    fun hideCreateDialog() {
+        _showCreateDialog.value = false
+    }
 
     // Search State
     private val _isDiscoveryMode = MutableStateFlow(false)
@@ -276,7 +427,6 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     // Discovery State
     private var discoveryJob: Job? = null
     private var filterJob: Job? = null
-    private val pathStack = Stack<String>()
 
     val storageLocations = listOf(
         NavigationItem("Internal Storage", rootDirectory.absolutePath, "storage"),
@@ -409,6 +559,32 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            if (isGlobalFilter && query.isNotEmpty()) {
+                val dbResults = repository.search(query)
+                if (dbResults.isNotEmpty()) {
+                    val filteredResults = dbResults.filter { file ->
+                        if (filter == FilterMode.None) true else {
+                            val ext = file.extension.lowercase()
+                            when (filter) {
+                                FilterMode.Images -> FileUtils.isImage(ext)
+                                FilterMode.Videos -> FileUtils.isVideo(ext)
+                                FilterMode.Audio -> FileUtils.isAudio(ext)
+                                FilterMode.Apks -> FileUtils.isApk(ext)
+                                FilterMode.Archives -> FileUtils.isArchive(ext)
+                                FilterMode.Documents -> FileUtils.isPdf(ext) || FileUtils.isDocx(ext) || FileUtils.isText(ext)
+                                else -> true
+                            }
+                        }
+                    }
+                    val finalSorted = filteredResults.sortedWith(getFileComparator())
+                    withContext(Dispatchers.Main) {
+                        _searchResults.value = finalSorted
+                        _isProcessing.value = false
+                    }
+                    return@launch
+                }
+            }
+
             val results = mutableListOf<File>()
             var lastUpdateTime = System.currentTimeMillis()
             val searchPath = if (isGlobalFilter) rootDirectory.absolutePath else _currentPath.value
@@ -444,7 +620,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             }.forEach { foundFile ->
                 results.add(foundFile)
                 val now = System.currentTimeMillis()
-                if (now - lastUpdateTime > 150) {
+                if (now - lastUpdateTime > 250) { // Increased buffer interval
                     val snapshot = results.toList()
                     withContext(Dispatchers.Main) { _searchResults.value = snapshot }
                     lastUpdateTime = now
@@ -464,8 +640,13 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             if (_isDiscoveryMode.value) exitDiscoveryMode()
             _currentFilter.value = FilterMode.None
             
-            val activeTab = _tabs.value[_activeTabIndex.value]
-            activeTab.pathStack.push(activeTab.path)
+            val activeIndex = _activeTabIndex.value
+            val currentTabs = _tabs.value.toMutableList()
+            val activeTab = currentTabs[activeIndex]
+            currentTabs[activeIndex] = activeTab.copy(
+                pathStack = activeTab.pathStack + activeTab.path
+            )
+            _tabs.value = currentTabs
             
             loadFiles(file.absolutePath)
             clearSelection()
@@ -489,8 +670,22 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 _videoPlaylist.value = currentFiles.filter { FileUtils.isVideo(it.extension.lowercase()) }
                 _previewFile.value = file
                 _currentScreen.value = AppScreen.VideoPlayer
-            } else {
+            } else if (FileUtils.isArchive(extension)) {
                 _previewFile.value = file
+                _currentScreen.value = AppScreen.ArchiveExplorer
+            } else if (FileUtils.isText(extension)) {
+                _previewFile.value = file
+                _currentScreen.value = AppScreen.TextViewer
+            } else if (FileUtils.isLikelyText(file)) {
+                // Double check it's not a known binary type before opening as text
+                if (!FileUtils.isPdf(extension) && !FileUtils.isArchive(extension)) {
+                    _previewFile.value = file
+                    _currentScreen.value = AppScreen.TextViewer
+                }
+            } else {
+                // For completely unknown files, do not open in any viewer automatically
+                _previewFile.value = null 
+                // Potentially trigger a system "Open With" here in the future
             }
         }
     }
@@ -564,8 +759,13 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             if (_isDiscoveryMode.value) exitDiscoveryMode()
             _currentFilter.value = FilterMode.None
             
-            val activeTab = _tabs.value[_activeTabIndex.value]
-            activeTab.pathStack.push(activeTab.path)
+            val activeIndex = _activeTabIndex.value
+            val currentTabs = _tabs.value.toMutableList()
+            val activeTab = currentTabs[activeIndex]
+            currentTabs[activeIndex] = activeTab.copy(
+                pathStack = activeTab.pathStack + activeTab.path
+            )
+            _tabs.value = currentTabs
             
             loadFiles(path)
             clearSelection()
@@ -576,13 +776,12 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         val path = _currentPath.value
         fileCache.remove(path)
         folderSizeCache.clear()
-        
+
         viewModelScope.launch(Dispatchers.IO) {
             _isProcessing.value = true
-            val directory = File(path)
-            val rawList = directory.listFiles() ?: emptyArray()
-            repository.indexFiles(path, rawList.toList())
-            
+            // Force refresh from disk and re-index
+            repository.getFilesForPath(path, forceRefresh = true)
+
             withContext(Dispatchers.Main) {
                 _isProcessing.value = false
                 if (_isDiscoveryMode.value || _currentFilter.value != FilterMode.None) {
@@ -594,6 +793,26 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun createItem(name: String, type: CreateType) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val currentDir = File(_currentPath.value)
+                if (!currentDir.exists() || !currentDir.isDirectory) return@launch
+
+                val newFile = when (type) {
+                    CreateType.Folder -> File(currentDir, name).apply { mkdirs() }
+                    CreateType.File -> File(currentDir, name).apply { createNewFile() }
+                    CreateType.Database -> File(currentDir, if (name.endsWith(".db")) name else "$name.db").apply { createNewFile() }
+                }
+
+                withContext(Dispatchers.Main) {
+                    refresh()
+                }
+            } catch (e: Exception) {
+                // Error handling could be added here
+            }
+        }
+    }
     fun goBack(): Boolean {
         if (_currentScreen.value == AppScreen.PdfViewer || _currentScreen.value == AppScreen.AudioPlayer || 
             _currentScreen.value == AppScreen.ImageViewer || _currentScreen.value == AppScreen.VideoPlayer) {
@@ -611,9 +830,15 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             return true
         }
         
-        val activeTab = _tabs.value[_activeTabIndex.value]
+        val activeIndex = _activeTabIndex.value
+        val currentTabs = _tabs.value.toMutableList()
+        val activeTab = currentTabs[activeIndex]
         if (activeTab.pathStack.isNotEmpty()) {
-            val previousPath = activeTab.pathStack.pop()
+            val previousPath = activeTab.pathStack.last()
+            currentTabs[activeIndex] = activeTab.copy(
+                pathStack = activeTab.pathStack.dropLast(1)
+            )
+            _tabs.value = currentTabs
             loadFiles(previousPath)
             clearSelection()
             return true
@@ -699,28 +924,22 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         
         discoveryJob?.cancel()
         filterJob?.cancel()
-        
+
         val cachedFiles = fileCache[path]
         if (cachedFiles != null) {
             _files.value = cachedFiles
             _isProcessing.value = false
-            // Update tab files even if cached
-            val newList = _tabs.value.toMutableList()
-            if (_activeTabIndex.value in newList.indices) {
-                newList[_activeTabIndex.value] = newList[_activeTabIndex.value].copy(files = cachedFiles)
-                _tabs.value = newList
-            }
-        } else {
-            _isProcessing.value = true
+            return
         }
 
+        _isProcessing.value = true
         viewModelScope.launch(Dispatchers.IO) {
             // Priority: FileRepository (Cached in DB)
-            val list = repository.getFilesForPath(path)
+            val list = repository.getFilesForPath(path, forceRefresh = false)
             val sortedList = list.sortedWith(getFileComparator())
-            
+
             fileCache[path] = sortedList
-            
+
             withContext(Dispatchers.Main) {
                 _files.value = sortedList
                 val newList = _tabs.value.toMutableList()
